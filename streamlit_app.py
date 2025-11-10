@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 # -------------------- Page --------------------
 st.set_page_config(page_title="Sectional CSV Builder — Gallop + Gmax", layout="wide")
 st.title("Sectional CSV Builder")
-st.caption("Race Edge CSV generator with Gallop + Gmax (Option B) importers, live edits, and an always-on Horse Weight column.")
+st.caption("Race Edge CSV generator with fixed steps: Gallop = 100 m • Gmax = 200 m. Includes live edits and Horse Weight column.")
 
 # -------------------- Utils --------------------
 def parse_time_to_seconds(x):
@@ -44,21 +44,25 @@ def ordered_columns(distance_m:int, step:int)->Tuple[List[str], List[int]]:
 
 def normalize_time_formats(df, time_cols):
     for c in time_cols:
-        df[c] = df[c].apply(lambda v: round(parse_time_to_seconds(v), 2) if (pd.notna(v) and str(v)!="") else v)
+        if c in df.columns:
+            df[c] = df[c].apply(lambda v: round(parse_time_to_seconds(v), 2) if (pd.notna(v) and str(v)!="") else v)
     if "Finish_Time" in df.columns:
         df["Finish_Time"] = df["Finish_Time"].apply(lambda v: round(parse_time_to_seconds(v), 2) if (pd.notna(v) and str(v)!="") else v)
     return df
 
 def compute_derived_segments(df, distance_m, step, markers):
-    split_cols = [f"{m}_Time" for m in markers[:-1]]
+    split_cols = [f"{m}_Time" for m in markers[:-1] if f"{m}_Time" in df.columns]
 
     def total_time(row):
         tot = 0.0; seen=False
         for c in split_cols:
-            if c in row and str(row[c]) not in ("", "nan") and pd.notna(row[c]):
-                tot += parse_time_to_seconds(row[c]); seen=True
-        if "Finish_Time" in row and str(row["Finish_Time"]) not in ("", "nan") and pd.notna(row["Finish_Time"]):
-            tot += parse_time_to_seconds(row["Finish_Time"]); seen=True
+            val = row.get(c, "")
+            if str(val) not in ("", "nan") and pd.notna(val):
+                tot += parse_time_to_seconds(val); seen=True
+        if "Finish_Time" in df.columns:
+            val = row.get("Finish_Time", "")
+            if str(val) not in ("", "nan") and pd.notna(val):
+                tot += parse_time_to_seconds(val); seen=True
         return round(tot,2) if seen else np.nan
 
     df["Race Time"] = df.apply(total_time, axis=1)
@@ -67,10 +71,10 @@ def compute_derived_segments(df, distance_m, step, markers):
     if "800_Time" in df.columns and "400_Time" in df.columns:
         if step == 200:
             for i,row in df.iterrows():
-                vals = []
+                vals=[]
                 for m in [800,600]:
                     c=f"{m}_Time"
-                    if c in df and str(row[c]) not in ("","nan") and pd.notna(row[c]):
+                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
                         vals.append(parse_time_to_seconds(row[c]))
                 df.at[i,"800-400"]= round(sum(vals),2) if vals else np.nan
         else:
@@ -78,7 +82,7 @@ def compute_derived_segments(df, distance_m, step, markers):
                 vals=[]
                 for m in [800,700,600,500,400]:
                     c=f"{m}_Time"
-                    if c in df and str(row[c]) not in ("","nan") and pd.notna(row[c]):
+                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
                         vals.append(parse_time_to_seconds(row[c]))
                 df.at[i,"800-400"]= round(sum(vals),2) if vals else np.nan
 
@@ -89,14 +93,14 @@ def compute_derived_segments(df, distance_m, step, markers):
             if step == 200:
                 for m in [400,200]:
                     c=f"{m}_Time"
-                    if c in df and str(row[c]) not in ("","nan") and pd.notna(row[c]):
+                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
                         vals.append(parse_time_to_seconds(row[c]))
             else:
                 for m in [400,300,200,100]:
                     c=f"{m}_Time"
-                    if c in df and str(row[c]) not in ("","nan") and pd.notna(row[c]):
+                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
                         vals.append(parse_time_to_seconds(row[c]))
-            if "Finish_Time" in df.columns and str(row["Finish_Time"]) not in ("","nan") and pd.notna(row["Finish_Time"]):
+            if "Finish_Time" in df.columns and pd.notna(row.get("Finish_Time","")) and str(row.get("Finish_Time",""))!="":
                 vals.append(parse_time_to_seconds(row["Finish_Time"]))
             df.at[i,"400-Finish"]= round(sum(vals),2) if vals else np.nan
 
@@ -109,13 +113,21 @@ def enforce_finish_pos_by_row(df):
 
 def reorder_columns(df, distance_m, step):
     desired, _ = ordered_columns(distance_m, step)
-    for must in ["Horse Weight"]:
-        if must not in df.columns:
-            df[must] = ""
+    # ensure single Horse Weight col, normalized naming
+    if "Horse Weight" not in df.columns:
+        df["Horse Weight"] = ""
+    df.columns = [c.strip() for c in df.columns]
     extra = [c for c in df.columns if c not in desired]
     return df.reindex(columns=desired + extra)
 
-# -------------------- Gallop adapter --------------------
+def detect_distance_from_runners(runners: List[Dict[str,Any]], default_step:int)->int:
+    """Distance = largest positive end + step; fallback to 1000."""
+    ends = [s["end"] for r in runners for s in r.get("sections",[]) if isinstance(s.get("end"), int) and s["end"]>0]
+    if not ends:
+        return 1000
+    return int(max(ends) + default_step)
+
+# -------------------- Gallop adapter (100 m fixed) --------------------
 def fetch_json(url: str):
     import requests
     r = requests.get(url, timeout=30)
@@ -125,40 +137,30 @@ def fetch_json(url: str):
 def normalize_gallop_payload(payload:Any)->List[Dict[str,Any]]:
     runners=[]
     if isinstance(payload, dict) and isinstance(payload.get("sectionals"), list):
-        for obj in payload["sectionals"]:
-            horse = obj.get("horse") or obj.get("runner") or obj.get("name") or obj.get("Horse") or ""
-            secs=[]
-            for s in obj.get("sections", []):
-                try:
-                    end = int(float(str(s.get("end","0")).replace("m","").strip()))
-                except Exception:
-                    continue
-                t = s.get("timeSec")
-                try: t = float(t) if t is not None else None
-                except: t=None
-                try: rnk = int(str(s.get("rankSec","")).strip()) if s.get("rankSec") not in (None,"") else None
-                except: rnk=None
-                secs.append({"end": end, "timeSec": t, "rankSec": rnk})
-            runners.append({"horse": horse, "sections": secs, "meta": {}})
+        blocks = payload["sectionals"]
     elif isinstance(payload, list):
-        for obj in payload:
-            horse = obj.get("horse") or obj.get("runner") or obj.get("name") or ""
-            secs=[]
-            for s in obj.get("sections", []):
-                try:
-                    end = int(float(str(s.get("end","0")).replace("m","").strip()))
-                except Exception:
-                    continue
-                t = s.get("timeSec")
-                try: t = float(t) if t is not None else None
-                except: t=None
-                try: rnk = int(str(s.get("rankSec","")).strip()) if s.get("rankSec") not in (None,"") else None
-                except: rnk=None
-                secs.append({"end": end, "timeSec": t, "rankSec": rnk})
-            runners.append({"horse": horse, "sections": secs, "meta": {}})
+        blocks = payload
+    else:
+        blocks = []
+
+    for obj in blocks:
+        horse = obj.get("horse") or obj.get("runner") or obj.get("name") or obj.get("Horse") or ""
+        secs=[]
+        for s in obj.get("sections", []):
+            try:
+                end = int(float(str(s.get("end","0")).replace("m","").strip()))
+            except Exception:
+                continue
+            t = s.get("timeSec")
+            try: t = float(t) if t is not None else None
+            except: t=None
+            try: rnk = int(str(s.get("rankSec","")).strip()) if s.get("rankSec") not in (None,"") else None
+            except: rnk=None
+            secs.append({"end": end, "timeSec": t, "rankSec": rnk})
+        runners.append({"horse": horse, "sections": secs, "meta": {}})
     return runners
 
-# -------------------- Gmax (Option B) adapter --------------------
+# -------------------- Gmax / TPD adapter (200 m fixed) --------------------
 def fetch_text(url: str):
     import requests
     r = requests.get(url, timeout=30)
@@ -167,25 +169,33 @@ def fetch_text(url: str):
 
 def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
     """
-    Parse 'new Ajax.Web.DataSet([new Ajax.Web.DataTable([...],[...])]);'
-    Returns (columns, rows)
+    Accepts bodies like:
+      "new Ajax.Web.DataSet([new Ajax.Web.DataTable(...)]);/*"
+    (may be quoted and backslash-escaped)
+    Returns (columns, rows).
     """
-    if not raw_text: return [], []
+    if not raw_text:
+        return [], []
 
-    s = raw_text.strip().replace('\\"','"')
+    s = raw_text.strip()
 
-    # strip wrapper
+    # If the whole payload is quoted, remove outer quotes
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1]
+
+    # Unescape \" → "
+    s = s.replace(r'\"', '"')
+
+    # Strip wrapper
     if s.startswith("new Ajax.Web.DataSet("):
         s = s[len("new Ajax.Web.DataSet("):]
-        # trim right
-        if s.endswith("*/"):
-            s = s[:-2]
-        if s.endswith(");"):
-            s = s[:-2]
+    # drop trailing ');' and optional comment
+    s = re.sub(r"\);\s*/\*.*$", "", s)
+    s = s.rstrip(");").strip()
+
+    # Normalize constructor & tokens to Python
     s = s.replace("new Ajax.Web.DataTable(", "(")
-    # replace JS Date constructors with None
     s = re.sub(r"new Date\(Date\.UTC\([^\)]*\)\)", "None", s)
-    # JS -> python
     s = s.replace("true","True").replace("false","False").replace("null","None")
 
     try:
@@ -193,7 +203,7 @@ def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
     except Exception:
         return [], []
 
-    cols, rows = [], []
+    # Find first (columns, rows) pair
     def find_table(obj):
         if isinstance(obj,(list,tuple)) and len(obj)>=2:
             a,b = obj[0], obj[1]
@@ -212,11 +222,7 @@ def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
     return cols, rows
 
 def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str,Any]]:
-    """
-    Convert Gmax dataset rows into normalized runners with sections.
-    KEEP source granularity (100m or 200m), no auto-sum.
-    Finish_Pos rule preference (Option 1A): use FinishPosition if present, else row order later.
-    """
+    """Convert Gmax dataset rows into normalized runners with sections (200 m gates)."""
     if not cols or not rows: return []
     pivot_ids=[]
     for c in cols:
@@ -273,7 +279,6 @@ def build_df_from_runners(runners:List[Dict[str,Any]], distance_m:int, step:int)
         if 0 in by_end and by_end[0].get("timeSec") is not None:
             df.at[i,"Finish_Time"] = round(float(by_end[0]["timeSec"]),2)
 
-        # Finish_Pos: use source if present (Option 1A)
         fp = (r.get("meta") or {}).get("FinishPosition")
         try:
             fp_val = int(fp) if fp not in (None,"",-99) else None
@@ -296,14 +301,14 @@ if "edited_df" not in st.session_state:
 tab1, tab2, tab3 = st.tabs(["1) Source", "2) Edit", "3) Export"])
 
 with tab1:
-    source = st.radio("Source", ["Gallop JSON", "Gmax (Option B) — Ajax DataSet"], horizontal=True)
+    source = st.radio("Source", ["Gallop JSON (100 m)", "Gmax / TPD (200 m)"], horizontal=True)
 
-    if source == "Gallop JSON":
+    if source.startswith("Gallop"):
+        # Fixed step for Gallop
+        fixed_step = 100
         url = st.text_input("Gallop JSON URL")
         raw = st.text_area("...or paste raw JSON here", height=160)
-        distance_m = st.number_input("Race distance (m)", min_value=800, max_value=3600, step=50, value=1600)
-        split_step = st.radio("Split step", options=[200,100], index=0, horizontal=True, key="gallop_step")
-
+        st.caption("Step size fixed: 100 m")
         if st.button("Fetch Gallop"):
             payload=None
             if url.strip():
@@ -324,22 +329,23 @@ with tab1:
                 if not runners:
                     st.warning("Parsed JSON but couldn't find 'sectionals'/'sections'.")
                 else:
-                    df = build_df_from_runners(runners, int(distance_m), int(split_step))
-                    desired, markers = ordered_columns(int(distance_m), int(split_step))
+                    distance_m = detect_distance_from_runners(runners, fixed_step)
+                    df = build_df_from_runners(runners, distance_m, fixed_step)
+                    desired, markers = ordered_columns(distance_m, fixed_step)
                     tcols = [f"{m}_Time" for m in markers[:-1]]
                     df = normalize_time_formats(df, tcols + (["Finish_Time"] if "Finish_Time" in df.columns else []))
-                    df = reorder_columns(df, int(distance_m), int(split_step))
-                    st.session_state.raw_snapshot = (df.copy(), int(distance_m), int(split_step))
+                    df = reorder_columns(df, distance_m, fixed_step)
+                    st.session_state.raw_snapshot = (df.copy(), distance_m, fixed_step)
                     st.session_state.edited_df = df.copy()
-                    st.success("Gallop loaded. Switch to Edit.")
+                    st.success(f"Gallop loaded. Distance inferred: {distance_m} m. Switch to Edit.")
                     st.dataframe(df, use_container_width=True)
 
     else:
-        url = st.text_input("Gmax XHR URL (optional)")
+        # Fixed step for Gmax
+        fixed_step = 200
+        url = st.text_input("Gmax/TPD XHR URL (optional)")
         raw = st.text_area("...or paste the full Response body (starts with 'new Ajax.Web.DataSet')", height=220)
-        distance_m = st.number_input("Race distance (m)", min_value=800, max_value=3600, step=50, value=1000, key="gmax_dist")
-        split_step = st.radio("Split step (we KEEP source granularity by default)", options=[200,100], index=1, horizontal=True, key="gmax_step")
-        st.caption("Per your preference: if source is 100m we KEEP 100m (no auto-sum).")
+        st.caption("Step size fixed: 200 m")
 
         if st.button("Fetch Gmax"):
             text=None
@@ -362,14 +368,15 @@ with tab1:
                     if not runners:
                         st.warning("Parsed payload but found no runners.")
                     else:
-                        df = build_df_from_runners(runners, int(distance_m), int(split_step))
-                        desired, markers = ordered_columns(int(distance_m), int(split_step))
+                        distance_m = detect_distance_from_runners(runners, fixed_step)
+                        df = build_df_from_runners(runners, distance_m, fixed_step)
+                        desired, markers = ordered_columns(distance_m, fixed_step)
                         tcols = [f"{m}_Time" for m in markers[:-1]]
                         df = normalize_time_formats(df, tcols + (["Finish_Time"] if "Finish_Time" in df.columns else []))
-                        df = reorder_columns(df, int(distance_m), int(split_step))
-                        st.session_state.raw_snapshot = (df.copy(), int(distance_m), int(split_step))
+                        df = reorder_columns(df, distance_m, fixed_step)
+                        st.session_state.raw_snapshot = (df.copy(), distance_m, fixed_step)
                         st.session_state.edited_df = df.copy()
-                        st.success("Gmax loaded. Switch to Edit.")
+                        st.success(f"Gmax loaded. Distance inferred: {distance_m} m. Switch to Edit.")
                         st.dataframe(df, use_container_width=True)
 
 with tab2:
@@ -378,14 +385,27 @@ with tab2:
         st.info("Load a source first in tab 1.")
     else:
         raw_df, dist, step = st.session_state.raw_snapshot
-        st.caption("You can paste straight into cells. Use Reset to source if needed.")
-        edited_df = st.data_editor(st.session_state.edited_df, num_rows="dynamic", use_container_width=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Reset to source"):
-                edited_df = raw_df.copy()
+
+        # Create edited_df if missing
+        if st.session_state.edited_df is None:
+            st.session_state.edited_df = raw_df.copy()
+
+        st.caption("Tip: paste straight into cells. Use Reset to discard all edits.")
+        edited_df = st.data_editor(
+            st.session_state.edited_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="grid",
+        )
+
+        col1, _ = st.columns(2)
+        with col1:
+            if st.button("Reset to source", use_container_width=True):
+                st.session_state.edited_df = raw_df.copy()
+                st.rerun()
+
+        # persist edits
         st.session_state.edited_df = edited_df
-        st.dataframe(edited_df, use_container_width=True)
 
 with tab3:
     st.subheader("Process & export")
@@ -395,7 +415,7 @@ with tab3:
         _, dist, step = st.session_state.raw_snapshot
         df_out = st.session_state.edited_df.copy()
 
-        # Finish_Pos fallback to row order if the column exists but is empty
+        # Finish_Pos fallback to row order if empty
         if "Finish_Pos" in df_out.columns:
             empty = df_out["Finish_Pos"].isna().all() or (df_out["Finish_Pos"]=="").all()
             if empty:
