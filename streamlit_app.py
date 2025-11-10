@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 # -------------------- Page --------------------
 st.set_page_config(page_title="Sectional CSV Builder — Gallop + Gmax", layout="wide")
 st.title("Sectional CSV Builder")
-st.caption("Race Edge CSV generator with fixed steps: Gallop = 100 m • Gmax = 200 m. Includes live edits and Horse Weight column.")
+st.caption("Race Edge CSV generator with fixed steps: Gallop = 100 m • Gmax/TPD = 200 m. Includes live edits and a single, always-on Horse Weight (text) column.")
 
 # -------------------- Utils --------------------
 def parse_time_to_seconds(x):
@@ -222,8 +222,13 @@ def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
     return cols, rows
 
 def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str,Any]]:
-    """Convert Gmax dataset rows into normalized runners with sections (200 m gates)."""
-    if not cols or not rows: return []
+    """
+    Convert Gmax dataset rows into normalized runners with sections (200 m gates).
+    - Horse name: prefer TrackName, fallback to ObjectName (cloth number)
+    - Draw: TrackNumber (int) or TrackCode (string)
+    """
+    if not cols or not rows:
+        return []
     pivot_ids=[]
     for c in cols:
         m = re.match(r"Pivot(\d+)_GateName", c)
@@ -233,24 +238,32 @@ def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str
     out=[]
     for row in rows:
         rec = {cols[i]: (row[i] if i < len(row) else None) for i in range(len(cols))}
-        horse = str(rec.get("ObjectName") or "").strip()
+        # ---- Names & draw
+        horse_name = (rec.get("TrackName") or rec.get("ObjectName") or "").strip()
+        draw = rec.get("TrackNumber")
+        if draw in (None, "", -99):
+            draw = rec.get("TrackCode")
+
         sections=[]
         for pid in pivot_ids:
             gate = rec.get(f"Pivot{pid}_GateName")
-            if not gate: continue
+            if not gate:
+                continue
             g = str(gate)
-            if g.lower()=="finish":
+            if g.lower() == "finish":
                 end_marker = 0
             else:
-                try: end_marker = int(g.lower().replace("m","").strip())
-                except: continue
+                try:
+                    end_marker = int(g.lower().replace("m","").strip())
+                except:
+                    continue
 
             t = rec.get(f"Pivot{pid}_SecTime")
             try: t = float(t) if t not in (None,"",-99) else None
-            except: t=None
+            except: t = None
             pos = rec.get(f"Pivot{pid}_Position")
             try: pos = int(pos) if pos not in (None,"",-99) else None
-            except: pos=None
+            except: pos = None
 
             sections.append({"end": end_marker, "timeSec": t, "rankSec": pos})
 
@@ -258,8 +271,9 @@ def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str
             "FinishPosition": rec.get("FinishPosition"),
             "DidNotFinish": rec.get("DidNotFinish"),
             "NotRun": rec.get("NotRun"),
+            "Draw": draw,
         }
-        out.append({"horse": horse, "sections": sections, "meta": meta})
+        out.append({"horse": horse_name, "sections": sections, "meta": meta})
     return out
 
 # -------------------- Build DF from normalized runners --------------------
@@ -268,6 +282,12 @@ def build_df_from_runners(runners:List[Dict[str,Any]], distance_m:int, step:int)
     df = pd.DataFrame([{c:"" for c in cols} for _ in range(len(runners))])
     for i, r in enumerate(runners):
         df.at[i,"Horse"] = (r.get("horse") or "").strip()
+
+        # Draw from meta if provided (Gmax)
+        draw = (r.get("meta") or {}).get("Draw")
+        if draw not in (None, "", -99):
+            df.at[i,"Draw"] = draw
+
         by_end = {s["end"]: s for s in r.get("sections",[]) if isinstance(s.get("end"), int)}
         for m in markers[:-1]:
             if m in by_end:
@@ -279,6 +299,7 @@ def build_df_from_runners(runners:List[Dict[str,Any]], distance_m:int, step:int)
         if 0 in by_end and by_end[0].get("timeSec") is not None:
             df.at[i,"Finish_Time"] = round(float(by_end[0]["timeSec"]),2)
 
+        # Finish_Pos: prefer source when present
         fp = (r.get("meta") or {}).get("FinishPosition")
         try:
             fp_val = int(fp) if fp not in (None,"",-99) else None
@@ -287,8 +308,11 @@ def build_df_from_runners(runners:List[Dict[str,Any]], distance_m:int, step:int)
         if fp_val is not None:
             df.at[i,"Finish_Pos"] = fp_val
 
+    # Guarantee a single Horse Weight column, as text (stable on iPad)
     if "Horse Weight" not in df.columns:
         df["Horse Weight"] = ""
+    df["Horse Weight"] = df["Horse Weight"].astype("object")
+
     return df
 
 # -------------------- Session --------------------
@@ -308,7 +332,8 @@ with tab1:
         fixed_step = 100
         url = st.text_input("Gallop JSON URL")
         raw = st.text_area("...or paste raw JSON here", height=160)
-        st.caption("Step size fixed: 100 m")
+        st.caption("📏 Step size fixed: 100 m")
+
         if st.button("Fetch Gallop"):
             payload=None
             if url.strip():
@@ -345,7 +370,7 @@ with tab1:
         fixed_step = 200
         url = st.text_input("Gmax/TPD XHR URL (optional)")
         raw = st.text_area("...or paste the full Response body (starts with 'new Ajax.Web.DataSet')", height=220)
-        st.caption("Step size fixed: 200 m")
+        st.caption("📏 Step size fixed: 200 m")
 
         if st.button("Fetch Gmax"):
             text=None
@@ -386,26 +411,34 @@ with tab2:
     else:
         raw_df, dist, step = st.session_state.raw_snapshot
 
-        # Create edited_df if missing
         if st.session_state.edited_df is None:
             st.session_state.edited_df = raw_df.copy()
 
-        st.caption("Tip: paste straight into cells. Use Reset to discard all edits.")
-        edited_df = st.data_editor(
-            st.session_state.edited_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="grid",
-        )
+        st.caption("Tip: paste into cells. Click **Save edits** to commit. Use **Reset to source** to discard.")
+        # Keep Horse Weight as a text field (prevents iPad first-keystroke loss)
+        colcfg = {
+            "Horse Weight": st.column_config.TextColumn(help="Enter as text (e.g., 494 or 494kg)")
+        }
 
-        col1, _ = st.columns(2)
-        with col1:
-            if st.button("Reset to source", use_container_width=True):
-                st.session_state.edited_df = raw_df.copy()
-                st.rerun()
+        # Wrap the editor in a FORM to avoid rerun wiping inputs on iPad Safari
+        with st.form("edit_form", clear_on_submit=False):
+            edited_df = st.data_editor(
+                st.session_state.edited_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="grid",
+                column_config=colcfg,
+            )
+            c1, c2 = st.columns(2)
+            save = c1.form_submit_button("💾 Save edits", use_container_width=True)
+            reset = c2.form_submit_button("↩️ Reset to source", use_container_width=True)
 
-        # persist edits
-        st.session_state.edited_df = edited_df
+        if save:
+            st.session_state.edited_df = edited_df.copy()
+            st.success("Edits saved.")
+        if reset:
+            st.session_state.edited_df = raw_df.copy()
+            st.info("Reverted to source.")
 
 with tab3:
     st.subheader("Process & export")
@@ -417,7 +450,10 @@ with tab3:
 
         # Finish_Pos fallback to row order if empty
         if "Finish_Pos" in df_out.columns:
-            empty = df_out["Finish_Pos"].isna().all() or (df_out["Finish_Pos"]=="").all()
+            try:
+                empty = df_out["Finish_Pos"].isna().all() or (df_out["Finish_Pos"]=="").all()
+            except Exception:
+                empty = False
             if empty:
                 df_out = enforce_finish_pos_by_row(df_out)
 
