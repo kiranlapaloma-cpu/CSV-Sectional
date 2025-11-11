@@ -463,10 +463,60 @@ with tab3:
         df_out = compute_derived_segments(df_out, int(dist), int(step), markers)
         df_out = reorder_columns(df_out, int(dist), int(step))
 
+                # --- Auto naming ---
+        # Winner name
+        winner_name = None
+        if "Finish_Pos" in df_out.columns and "Horse" in df_out.columns:
+            try:
+                win_row = df_out[df_out["Finish_Pos"].astype(str) == "1"]
+                if not win_row.empty:
+                    winner_name = str(win_row.iloc[0]["Horse"]).strip()
+            except Exception:
+                pass
+        if not winner_name:
+            winner_name = "WinnerUnknown"
+        safe_winner = re.sub(r"[^A-Za-z0-9_]+", "_", winner_name.replace(" ", "_")).strip("_")
+
+        # Race date (priority order):
+        # 1) Gallop payload field (date/raceDate/meetingDate)
+        # 2) YYYYMMDD inside URL or raw text (covers Sect-XGD-20251107-2)
+        # 3) Gmax ShareCode=VAYYYYMMDDHHMM pattern in URL
+        # 4) Today
+        from datetime import datetime
+        race_date = None
+        ctx = st.session_state
+
+        # 1) Gallop payload explicit date
+        payload = ctx.get("source_payload")
+        if isinstance(payload, dict):
+            for k in ("date", "raceDate", "meetingDate"):
+                if k in payload and payload[k]:
+                    race_date = str(payload[k])[:10].replace("-", "")
+                    # if it's already YYYYMMDD leave as is; else try to parse ISO
+                    if not re.match(r"^20\d{6}$", race_date):
+                        try:
+                            race_date = datetime.fromisoformat(str(payload[k])[:10]).strftime("%Y%m%d")
+                        except Exception:
+                            race_date = None
+                    break
+
+        # 2 & 3) Any YYYYMMDD in URL/raw (covers Sect code & Gmax ShareCode)
+        if not race_date:
+            src_url = ctx.get("source_url") or ""
+            src_raw = ctx.get("source_raw") or ""
+            race_date = extract_date_from_text(src_url) or extract_date_from_text(src_raw)
+
+        # 4) Fallback to today
+        if not race_date:
+            race_date = datetime.now().strftime("%Y%m%d")
+
+        # Build clean filename
+        file_name = f"{safe_winner}_{race_date}_{dist}m_{step}splits.csv"
+
         st.dataframe(df_out, use_container_width=True)
         st.download_button(
-            "⬇️ Download CSV (Race Edge format)",
+            f"⬇️ Download CSV — {winner_name} ({race_date})",
             df_out.to_csv(index=False).encode("utf-8"),
-            file_name=f"race_{dist}m_{step}splits.csv",
+            file_name=file_name,
             mime="text/csv",
         )
