@@ -127,6 +127,37 @@ def detect_distance_from_runners(runners: List[Dict[str,Any]], default_step:int)
         return 1000
     return int(max(ends) + default_step)
 
+def parse_gate_to_end(gate: str) -> int | None:
+    """
+    Normalise Gmax gate labels to an integer 'end' in metres.
+    Handles:
+      - 'Finish' -> 0
+      - '1000m', ' 1000 m ' -> 1000
+      - 'S-1000m', 'S-1200', 'Start-1200' -> strip the prefix and return the number
+    """
+    s = str(gate or "").strip().lower()
+    if not s:
+        return None
+    s = s.replace("–", "-").replace("—", "-")  # normalize dashes
+    if s == "finish":
+        return 0
+    # Prefer ####m with optional space: covers 's-1200 m'
+    m = re.search(r"\b(\d{2,4})\s*m\b", s)
+    if m:
+        return int(m.group(1))
+    # Fallback: any 3–4 digit number anywhere
+    m = re.search(r"\b(\d{3,4})\b", s)
+    return int(m.group(1)) if m else None
+
+def extract_date_from_text(text: str) -> str | None:
+    """
+    Return YYYYMMDD if found in text (URL, blob, e.g., 'Sect-XGD-20251107-2').
+    """
+    if not text:
+        return None
+    m = re.search(r"(20\d{6})", text)
+    return m.group(1) if m else None
+
 # -------------------- Gallop adapter (100 m fixed) --------------------
 def fetch_json(url: str):
     import requests
@@ -169,10 +200,8 @@ def fetch_text(url: str):
 
 def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
     """
-    Accepts bodies like:
-      "new Ajax.Web.DataSet([new Ajax.Web.DataTable(...)]);/*"
-    (may be quoted and backslash-escaped)
-    Returns (columns, rows).
+    Accepts bodies like: "new Ajax.Web.DataSet([new Ajax.Web.DataTable(...)]);/*"
+    (may be quoted/backslash-escaped). Returns (columns, rows).
     """
     if not raw_text:
         return [], []
@@ -189,6 +218,7 @@ def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
     # Strip wrapper
     if s.startswith("new Ajax.Web.DataSet("):
         s = s[len("new Ajax.Web.DataSet("):]
+
     # drop trailing ');' and optional comment
     s = re.sub(r"\);\s*/\*.*$", "", s)
     s = s.rstrip(");").strip()
@@ -224,20 +254,22 @@ def parse_gmax_dataset(raw_text: str)->Tuple[List[str], List[List[Any]]]:
 def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str,Any]]:
     """
     Convert Gmax dataset rows into normalized runners with sections (200 m gates).
-    - Horse name: prefer TrackName, fallback to ObjectName (cloth number)
+    - Horse name: prefer TrackName, fallback to ObjectName (cloth/number if name missing)
     - Draw: TrackNumber (int) or TrackCode (string)
+    - Gate parsing: 'Finish' -> 0; 'S-1000m'/'S-1200'/'1000m' -> 1000/1200/etc
     """
     if not cols or not rows:
         return []
     pivot_ids=[]
     for c in cols:
         m = re.match(r"Pivot(\d+)_GateName", c)
-        if m: pivot_ids.append(int(m.group(1)))
+        if m:
+            pivot_ids.append(int(m.group(1)))
     pivot_ids = sorted(set(pivot_ids))
 
     out=[]
     for row in rows:
-        rec = {cols[i]: (row[i] if i < len(row) else None) for i in range(len(cols))}
+        rec = {cols[i]: (row[i] if i < len(cols) else None) for i in range(len(cols))}
         # ---- Names & draw
         horse_name = (rec.get("TrackName") or rec.get("ObjectName") or "").strip()
         draw = rec.get("TrackNumber")
@@ -249,14 +281,9 @@ def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str
             gate = rec.get(f"Pivot{pid}_GateName")
             if not gate:
                 continue
-            g = str(gate)
-            if g.lower() == "finish":
-                end_marker = 0
-            else:
-                try:
-                    end_marker = int(g.lower().replace("m","").strip())
-                except:
-                    continue
+            end_marker = parse_gate_to_end(gate)
+            if end_marker is None:
+                continue
 
             t = rec.get(f"Pivot{pid}_SecTime")
             try: t = float(t) if t not in (None,"",-99) else None
@@ -320,6 +347,10 @@ if "raw_snapshot" not in st.session_state:
     st.session_state.raw_snapshot = None  # (df, distance, step)
 if "edited_df" not in st.session_state:
     st.session_state.edited_df = None
+# stash source context for auto filename
+for k in ("source_payload","source_url","source_raw"):
+    if k not in st.session_state:
+        st.session_state[k] = None
 
 # -------------------- UI --------------------
 tab1, tab2, tab3 = st.tabs(["1) Source", "2) Edit", "3) Export"])
@@ -339,17 +370,22 @@ with tab1:
             if url.strip():
                 try:
                     payload = fetch_json(url.strip())
+                    st.session_state.source_url = url.strip()
+                    st.session_state.source_raw = None
                 except Exception as e:
                     st.error(f"Fetch error: {e}")
             elif raw.strip():
                 try:
                     payload = json.loads(raw.strip())
+                    st.session_state.source_url = None
+                    st.session_state.source_raw = raw.strip()
                 except Exception as e:
                     st.error(f"Invalid JSON: {e}")
             else:
                 st.warning("Provide a URL or paste raw JSON.")
 
             if payload is not None:
+                st.session_state.source_payload = payload
                 runners = normalize_gallop_payload(payload)
                 if not runners:
                     st.warning("Parsed JSON but couldn't find 'sectionals'/'sections'.")
@@ -377,14 +413,19 @@ with tab1:
             if url.strip():
                 try:
                     text = fetch_text(url.strip())
+                    st.session_state.source_url = url.strip()
+                    st.session_state.source_raw = None
                 except Exception as e:
                     st.error(f"Fetch error: {e}")
             elif raw.strip():
                 text = raw.strip()
+                st.session_state.source_url = None
+                st.session_state.source_raw = raw.strip()
             else:
                 st.warning("Provide a URL or paste the response body.")
 
             if text:
+                st.session_state.source_payload = None  # not JSON; clear
                 cols, rows = parse_gmax_dataset(text)
                 if not cols or not rows:
                     st.error("Could not parse the Ajax DataSet payload. Paste the exact XHR response.")
@@ -463,7 +504,7 @@ with tab3:
         df_out = compute_derived_segments(df_out, int(dist), int(step), markers)
         df_out = reorder_columns(df_out, int(dist), int(step))
 
-                # --- Auto naming ---
+        # --- Auto naming ---
         # Winner name
         winner_name = None
         if "Finish_Pos" in df_out.columns and "Horse" in df_out.columns:
@@ -480,19 +521,15 @@ with tab3:
         # Race date (priority order):
         # 1) Gallop payload field (date/raceDate/meetingDate)
         # 2) YYYYMMDD inside URL or raw text (covers Sect-XGD-20251107-2)
-        # 3) Gmax ShareCode=VAYYYYMMDDHHMM pattern in URL
-        # 4) Today
+        # 3) Fallback to today
         from datetime import datetime
         race_date = None
-        ctx = st.session_state
 
-        # 1) Gallop payload explicit date
-        payload = ctx.get("source_payload")
+        payload = st.session_state.get("source_payload")
         if isinstance(payload, dict):
             for k in ("date", "raceDate", "meetingDate"):
                 if k in payload and payload[k]:
                     race_date = str(payload[k])[:10].replace("-", "")
-                    # if it's already YYYYMMDD leave as is; else try to parse ISO
                     if not re.match(r"^20\d{6}$", race_date):
                         try:
                             race_date = datetime.fromisoformat(str(payload[k])[:10]).strftime("%Y%m%d")
@@ -500,13 +537,11 @@ with tab3:
                             race_date = None
                     break
 
-        # 2 & 3) Any YYYYMMDD in URL/raw (covers Sect code & Gmax ShareCode)
         if not race_date:
-            src_url = ctx.get("source_url") or ""
-            src_raw = ctx.get("source_raw") or ""
+            src_url = st.session_state.get("source_url") or ""
+            src_raw = st.session_state.get("source_raw") or ""
             race_date = extract_date_from_text(src_url) or extract_date_from_text(src_raw)
 
-        # 4) Fallback to today
         if not race_date:
             race_date = datetime.now().strftime("%Y%m%d")
 
