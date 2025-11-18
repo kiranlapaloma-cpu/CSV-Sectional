@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 # -------------------- Page --------------------
 st.set_page_config(page_title="Sectional CSV Builder — Gallop + Gmax", layout="wide")
 st.title("Sectional CSV Builder")
-st.caption("Race Edge CSV generator with fixed steps: Gallop = 100 m • Gmax/TPD = 200 m. Includes live edits and a single, always-on Horse Weight (text) column.")
+st.caption("Race Edge CSV generator with fixed steps: Gallop = 100 m / 200 m (auto) • Gmax/TPD = 200 m. Includes live edits and a single, always-on Horse Weight (text) column.")
 
 # -------------------- Utils --------------------
 def parse_time_to_seconds(x):
@@ -45,70 +45,81 @@ def ordered_columns(distance_m:int, step:int)->Tuple[List[str], List[int]]:
 def normalize_time_formats(df, time_cols):
     for c in time_cols:
         if c in df.columns:
-            df[c] = df[c].apply(lambda v: round(parse_time_to_seconds(v), 2) if (pd.notna(v) and str(v)!="") else v)
+            df[c] = df[c].apply(
+                lambda v: round(parse_time_to_seconds(v), 2)
+                if (pd.notna(v) and str(v) != "")
+                else v
+            )
     if "Finish_Time" in df.columns:
-        df["Finish_Time"] = df["Finish_Time"].apply(lambda v: round(parse_time_to_seconds(v), 2) if (pd.notna(v) and str(v)!="") else v)
+        df["Finish_Time"] = df["Finish_Time"].apply(
+            lambda v: round(parse_time_to_seconds(v), 2)
+            if (pd.notna(v) and str(v) != "")
+            else v
+        )
     return df
 
 def compute_derived_segments(df, distance_m, step, markers):
     split_cols = [f"{m}_Time" for m in markers[:-1] if f"{m}_Time" in df.columns]
 
     def total_time(row):
-        tot = 0.0; seen=False
+        tot = 0.0
+        seen = False
         for c in split_cols:
             val = row.get(c, "")
             if str(val) not in ("", "nan") and pd.notna(val):
-                tot += parse_time_to_seconds(val); seen=True
+                tot += parse_time_to_seconds(val)
+                seen = True
         if "Finish_Time" in df.columns:
             val = row.get("Finish_Time", "")
             if str(val) not in ("", "nan") and pd.notna(val):
-                tot += parse_time_to_seconds(val); seen=True
-        return round(tot,2) if seen else np.nan
+                tot += parse_time_to_seconds(val)
+                seen = True
+        return round(tot, 2) if seen else np.nan
 
     df["Race Time"] = df.apply(total_time, axis=1)
 
     # 800-400
     if "800_Time" in df.columns and "400_Time" in df.columns:
         if step == 200:
-            for i,row in df.iterrows():
-                vals=[]
-                for m in [800,600]:
-                    c=f"{m}_Time"
-                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
+            for i, row in df.iterrows():
+                vals = []
+                for m in [800, 600]:
+                    c = f"{m}_Time"
+                    if c in df.columns and pd.notna(row.get(c, "")) and str(row.get(c, "")) != "":
                         vals.append(parse_time_to_seconds(row[c]))
-                df.at[i,"800-400"]= round(sum(vals),2) if vals else np.nan
+                df.at[i, "800-400"] = round(sum(vals), 2) if vals else np.nan
         else:
-            for i,row in df.iterrows():
-                vals=[]
-                for m in [800,700,600,500,400]:
-                    c=f"{m}_Time"
-                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
+            for i, row in df.iterrows():
+                vals = []
+                for m in [800, 700, 600, 500, 400]:
+                    c = f"{m}_Time"
+                    if c in df.columns and pd.notna(row.get(c, "")) and str(row.get(c, "")) != "":
                         vals.append(parse_time_to_seconds(row[c]))
-                df.at[i,"800-400"]= round(sum(vals),2) if vals else np.nan
+                df.at[i, "800-400"] = round(sum(vals), 2) if vals else np.nan
 
     # 400-Finish
     if "400_Time" in df.columns:
-        for i,row in df.iterrows():
-            vals=[]
+        for i, row in df.iterrows():
+            vals = []
             if step == 200:
-                for m in [400,200]:
-                    c=f"{m}_Time"
-                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
+                for m in [400, 200]:
+                    c = f"{m}_Time"
+                    if c in df.columns and pd.notna(row.get(c, "")) and str(row.get(c, "")) != "":
                         vals.append(parse_time_to_seconds(row[c]))
             else:
-                for m in [400,300,200,100]:
-                    c=f"{m}_Time"
-                    if c in df.columns and pd.notna(row.get(c,"")) and str(row.get(c,""))!="":
+                for m in [400, 300, 200, 100]:
+                    c = f"{m}_Time"
+                    if c in df.columns and pd.notna(row.get(c, "")) and str(row.get(c, "")) != "":
                         vals.append(parse_time_to_seconds(row[c]))
-            if "Finish_Time" in df.columns and pd.notna(row.get("Finish_Time","")) and str(row.get("Finish_Time",""))!="":
+            if "Finish_Time" in df.columns and pd.notna(row.get("Finish_Time", "")) and str(row.get("Finish_Time", "")) != "":
                 vals.append(parse_time_to_seconds(row["Finish_Time"]))
-            df.at[i,"400-Finish"]= round(sum(vals),2) if vals else np.nan
+            df.at[i, "400-Finish"] = round(sum(vals), 2) if vals else np.nan
 
     return df
 
 def enforce_finish_pos_by_row(df):
     if "Finish_Pos" in df.columns:
-        df["Finish_Pos"] = [i+1 for i in range(len(df))]
+        df["Finish_Pos"] = [i + 1 for i in range(len(df))]
     return df
 
 def reorder_columns(df, distance_m, step):
@@ -120,12 +131,43 @@ def reorder_columns(df, distance_m, step):
     extra = [c for c in df.columns if c not in desired]
     return df.reindex(columns=desired + extra)
 
-def detect_distance_from_runners(runners: List[Dict[str,Any]], default_step:int)->int:
+def detect_distance_from_runners(runners: List[Dict[str, Any]], default_step:int)->int:
     """Distance = largest positive end + step; fallback to 1000."""
-    ends = [s["end"] for r in runners for s in r.get("sections",[]) if isinstance(s.get("end"), int) and s["end"]>0]
+    ends = [
+        s["end"]
+        for r in runners
+        for s in r.get("sections", [])
+        if isinstance(s.get("end"), int) and s["end"] > 0
+    ]
     if not ends:
         return 1000
     return int(max(ends) + default_step)
+
+def detect_gallop_step(runners: List[Dict[str, Any]], fallback:int = 100) -> int:
+    """
+    Inspect Gallop 'end' markers and infer the working step:
+    - If spacing is pure 200 m -> 200
+    - Otherwise                -> 100 (after any 50→100 compression)
+    """
+    ends = sorted(
+        {
+            s["end"]
+            for r in runners
+            for s in r.get("sections", [])
+            if isinstance(s.get("end"), int) and s["end"] > 0
+        },
+        reverse=True,
+    )
+    if len(ends) < 2:
+        return fallback
+
+    diffs = sorted({ends[i] - ends[i+1] for i in range(len(ends)-1) if ends[i] - ends[i+1] > 0})
+    if not diffs:
+        return fallback
+
+    if diffs == [200]:
+        return 200
+    return 100
 
 def parse_gate_to_end(gate: str) -> int | None:
     """
@@ -158,7 +200,75 @@ def extract_date_from_text(text: str) -> str | None:
     m = re.search(r"(20\d{6})", text)
     return m.group(1) if m else None
 
-# -------------------- Gallop adapter (100 m fixed) --------------------
+# -------------------- Gallop 50m → 100m helper --------------------
+def compress_gallop_sections_50_to_100(raw_secs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Take a list of Gallop sections with 50 m granularity and compress them into 100 m splits.
+    - We produce 'end' markers at clean 100 m points (e.g., 1500, 1400, 1300, …).
+    - Each 100 m split is approximated by summing the two adjacent 50 m splits around that 100m point.
+    - Finish (end == 0) is carried through unchanged if present.
+    """
+    by_end = {
+        s["end"]: {
+            "timeSec": s.get("timeSec"),
+            "rankSec": s.get("rankSec"),
+        }
+        for s in raw_secs
+        if isinstance(s.get("end"), int)
+    }
+    if not by_end:
+        return raw_secs
+
+    ends = sorted([e for e in by_end.keys() if e > 0], reverse=True)
+    if len(ends) < 2:
+        return raw_secs
+
+    # Decide if this really looks like 50 m grid
+    diffs = sorted({ends[i] - ends[i+1] for i in range(len(ends)-1) if ends[i] - ends[i+1] > 0})
+    if not diffs or diffs[0] != 50:
+        return raw_secs  # not a pure 50m feed; leave as-is
+
+    # Target: clean 100 m markers that exist in the feed
+    target_ends = sorted({e for e in ends if e % 100 == 0}, reverse=True)
+
+    agg: List[Dict[str, Any]] = []
+
+    for E in target_ends:
+        s_hi = by_end.get(E)
+        s_lo = by_end.get(E - 50)
+
+        # If we have both halves (E and E-50), sum their times = an approximate 100 m split
+        if (
+            s_hi
+            and s_lo
+            and s_hi.get("timeSec") is not None
+            and s_lo.get("timeSec") is not None
+        ):
+            t = float(s_hi["timeSec"]) + float(s_lo["timeSec"])
+            # For rank, take "best" (lowest) if available
+            ranks = [r for r in (s_hi.get("rankSec"), s_lo.get("rankSec")) if r is not None]
+            rank = min(ranks) if ranks else None
+            agg.append({"end": E, "timeSec": round(t, 3), "rankSec": rank})
+        elif s_hi:
+            # Fallback: use the original reading if we can't form a proper pair
+            agg.append(
+                {
+                    "end": E,
+                    "timeSec": s_hi.get("timeSec"),
+                    "rankSec": s_hi.get("rankSec"),
+                }
+            )
+
+    # Preserve finish (0) entry if present
+    if 0 in by_end:
+        fs = by_end[0]
+        agg.append({"end": 0, "timeSec": fs.get("timeSec"), "rankSec": fs.get("rankSec")})
+
+    # Sort back in descending 'end' order
+    agg.sort(key=lambda d: d["end"], reverse=True)
+    return agg
+
+# -------------------- Gallop adapter --------------------
 def fetch_json(url: str):
     import requests
     r = requests.get(url, timeout=30)
@@ -166,6 +276,13 @@ def fetch_json(url: str):
     return r.json()
 
 def normalize_gallop_payload(payload:Any)->List[Dict[str,Any]]:
+    """
+    Normalise Gallop JSON into runners with sections.
+    - Supports mixed feeds:
+      * 50 m → compressed into 100 m splits
+      * 100 m → kept as 100 m
+      * 200 m → kept as 200 m
+    """
     runners=[]
     if isinstance(payload, dict) and isinstance(payload.get("sectionals"), list):
         blocks = payload["sectionals"]
@@ -176,18 +293,35 @@ def normalize_gallop_payload(payload:Any)->List[Dict[str,Any]]:
 
     for obj in blocks:
         horse = obj.get("horse") or obj.get("runner") or obj.get("name") or obj.get("Horse") or ""
-        secs=[]
+        raw_secs=[]
         for s in obj.get("sections", []):
             try:
                 end = int(float(str(s.get("end","0")).replace("m","").strip()))
             except Exception:
                 continue
             t = s.get("timeSec")
-            try: t = float(t) if t is not None else None
-            except: t=None
-            try: rnk = int(str(s.get("rankSec","")).strip()) if s.get("rankSec") not in (None,"") else None
-            except: rnk=None
-            secs.append({"end": end, "timeSec": t, "rankSec": rnk})
+            try:
+                t = float(t) if t is not None else None
+            except Exception:
+                t = None
+            try:
+                rnk = int(str(s.get("rankSec","")).strip()) if s.get("rankSec") not in (None,"") else None
+            except Exception:
+                rnk = None
+            raw_secs.append({"end": end, "timeSec": t, "rankSec": rnk})
+
+        # Detect if this horse's feed is 50 m and compress to 100 m in that case
+        ends = sorted([sec["end"] for sec in raw_secs if isinstance(sec.get("end"), int) and sec["end"] > 0], reverse=True)
+        if len(ends) >= 2:
+            diffs = sorted({ends[i] - ends[i+1] for i in range(len(ends)-1) if ends[i] - ends[i+1] > 0})
+        else:
+            diffs = []
+
+        if diffs and diffs[0] == 50:
+            secs = compress_gallop_sections_50_to_100(raw_secs)
+        else:
+            secs = raw_secs
+
         runners.append({"horse": horse, "sections": secs, "meta": {}})
     return runners
 
@@ -286,11 +420,15 @@ def normalize_gmax_rows(cols: List[str], rows: List[List[Any]]) -> List[Dict[str
                 continue
 
             t = rec.get(f"Pivot{pid}_SecTime")
-            try: t = float(t) if t not in (None,"",-99) else None
-            except: t = None
+            try:
+                t = float(t) if t not in (None,"",-99) else None
+            except Exception:
+                t = None
             pos = rec.get(f"Pivot{pid}_Position")
-            try: pos = int(pos) if pos not in (None,"",-99) else None
-            except: pos = None
+            try:
+                pos = int(pos) if pos not in (None,"",-99) else None
+            except Exception:
+                pos = None
 
             sections.append({"end": end_marker, "timeSec": t, "rankSec": pos})
 
@@ -330,7 +468,7 @@ def build_df_from_runners(runners:List[Dict[str,Any]], distance_m:int, step:int)
         fp = (r.get("meta") or {}).get("FinishPosition")
         try:
             fp_val = int(fp) if fp not in (None,"",-99) else None
-        except:
+        except Exception:
             fp_val = None
         if fp_val is not None:
             df.at[i,"Finish_Pos"] = fp_val
@@ -356,14 +494,13 @@ for k in ("source_payload","source_url","source_raw"):
 tab1, tab2, tab3 = st.tabs(["1) Source", "2) Edit", "3) Export"])
 
 with tab1:
-    source = st.radio("Source", ["Gallop JSON (100 m)", "Gmax / TPD (200 m)"], horizontal=True)
+    source = st.radio("Source", ["Gallop JSON (auto 100/200)", "Gmax / TPD (200 m)"], horizontal=True)
 
     if source.startswith("Gallop"):
-        # Fixed step for Gallop
-        fixed_step = 100
+        # Gallop: auto 100 m / 200 m; 50 m feeds compressed to 100 m
         url = st.text_input("Gallop JSON URL")
         raw = st.text_area("...or paste raw JSON here", height=160)
-        st.caption("📏 Step size fixed: 100 m")
+        st.caption("📏 Gallop: auto 100 m / 200 m. 50 m feeds are compressed to 100 m.")
 
         if st.button("Fetch Gallop"):
             payload=None
@@ -390,15 +527,22 @@ with tab1:
                 if not runners:
                     st.warning("Parsed JSON but couldn't find 'sectionals'/'sections'.")
                 else:
-                    distance_m = detect_distance_from_runners(runners, fixed_step)
-                    df = build_df_from_runners(runners, distance_m, fixed_step)
-                    desired, markers = ordered_columns(distance_m, fixed_step)
+                    # Infer Gallop step: 100 m or 200 m (after any 50→100 compression)
+                    gallop_step = detect_gallop_step(runners, fallback=100)
+                    distance_m = detect_distance_from_runners(runners, gallop_step)
+
+                    df = build_df_from_runners(runners, distance_m, gallop_step)
+                    desired, markers = ordered_columns(distance_m, gallop_step)
                     tcols = [f"{m}_Time" for m in markers[:-1]]
-                    df = normalize_time_formats(df, tcols + (["Finish_Time"] if "Finish_Time" in df.columns else []))
-                    df = reorder_columns(df, distance_m, fixed_step)
-                    st.session_state.raw_snapshot = (df.copy(), distance_m, fixed_step)
+                    df = normalize_time_formats(
+                        df,
+                        tcols + (["Finish_Time"] if "Finish_Time" in df.columns else [])
+                    )
+                    df = reorder_columns(df, distance_m, gallop_step)
+
+                    st.session_state.raw_snapshot = (df.copy(), distance_m, gallop_step)
                     st.session_state.edited_df = df.copy()
-                    st.success(f"Gallop loaded. Distance inferred: {distance_m} m. Switch to Edit.")
+                    st.success(f"Gallop loaded. Step inferred: {gallop_step} m. Distance inferred: {distance_m} m. Switch to Edit.")
                     st.dataframe(df, use_container_width=True)
 
     else:
@@ -406,7 +550,7 @@ with tab1:
         fixed_step = 200
         url = st.text_input("Gmax/TPD XHR URL (optional)")
         raw = st.text_area("...or paste the full Response body (starts with 'new Ajax.Web.DataSet')", height=220)
-        st.caption("📏 Step size fixed: 200 m")
+        st.caption("📏 Gmax/TPD: fixed 200 m")
 
         if st.button("Fetch Gmax"):
             text=None
@@ -438,7 +582,10 @@ with tab1:
                         df = build_df_from_runners(runners, distance_m, fixed_step)
                         desired, markers = ordered_columns(distance_m, fixed_step)
                         tcols = [f"{m}_Time" for m in markers[:-1]]
-                        df = normalize_time_formats(df, tcols + (["Finish_Time"] if "Finish_Time" in df.columns else []))
+                        df = normalize_time_formats(
+                            df,
+                            tcols + (["Finish_Time"] if "Finish_Time" in df.columns else [])
+                        )
                         df = reorder_columns(df, distance_m, fixed_step)
                         st.session_state.raw_snapshot = (df.copy(), distance_m, fixed_step)
                         st.session_state.edited_df = df.copy()
@@ -500,7 +647,10 @@ with tab3:
 
         desired, markers = ordered_columns(int(dist), int(step))
         tcols = [f"{m}_Time" for m in markers[:-1]]
-        df_out = normalize_time_formats(df_out, tcols + (["Finish_Time"] if "Finish_Time" in df_out.columns else []))
+        df_out = normalize_time_formats(
+            df_out,
+            tcols + (["Finish_Time"] if "Finish_Time" in df_out.columns else [])
+        )
         df_out = compute_derived_segments(df_out, int(dist), int(step), markers)
         df_out = reorder_columns(df_out, int(dist), int(step))
 
